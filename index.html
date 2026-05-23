@@ -45,7 +45,6 @@
     font-size: clamp(.9rem, 2.5vw, 1.2rem);
     opacity: .7;
   }
-  /* touch feedback */
   #tap-hint {
     position: fixed;
     bottom: 2rem; left: 50%;
@@ -76,89 +75,144 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 
 let W, H;
-const emojis = ['🌟','✨','⭐','💫','🌈','🎉','🎊','💜','🖤','🌸','🍀','🎵','🎶','💻','⚡','🔥','💧','🍃','🦋','💎','🎲','🎯','🎮','🕹️','🚀','🔮','💡','🎪','🎭','🎨','🎼','🏔️','🌊','🌌','💫','⭐','🌙','🌺','🍄','🌿','🐚','🪐','💙','🤍','💗','🌷'];
 
-// === EMOJI RAIN ENGINE ===
+// ── Emoji pools organised by Unicode category ──
+// Each group corresponds to a real Unicode emoji block.
+// We still curate because many codepoints in these ranges
+// are modifiers, ZWJ sequences, or unassigned.
+const EMOJI_POOLS = {
+  // U+2600–U+26FF  Miscellaneous Symbols (weather, signs)
+  signs:       ['☀️','☁️','⛈️','🌤️','⚡','☄️','🔥','💧','🌊','☂️','❄️','☃️','⭐','☘️','⚔️','⚙️','☕','⚡'],
+  // U+2700–U+27BF  Dingbats (stars, crosses, symbols)
+  dingbats:    ['✂️','✅','✉️','✌️','✍️','✨','❌','❓','❗','➕','➖','➗','➰','✔️','✖️','✳️','✴️','❇️'],
+  // U+1F300–U+1F5FF  Misc Symbols & Pictographs (weather, objects)
+  pictographs: ['🌈','🌍','🌎','🌏','🌑','🌒','🌓','🌔','🌕','🌟','🌙','🌸','🌺','🌻','🌼','🌷','🍀','🍁','🍂','🍃','🍄','🌿','🌵','🎄','🎉','🎊','🎈','🎁','🎀','🎲','🎯','🎮','🎨','🎭','🎪','🎵','🎶','🎸','🎺','🎻','🎼','🏆','🏔️','🏖️','🏗️','🏛️','🛠️','🛡️','🔮','💎','💡','💻','📱','📡','📚','🔬','🔭','🔧','🔨','🕹️','🖥️','🗿','🪐'],
+  // U+1F600–U+1F64F  Emoticons (faces)
+  emoticons:   ['😊','😎','🤔','🤗','🤩','😌','😏','😴','🤯','🥳','😈','👻','💀','☠️','🎃','🤖'],
+  // U+1F680–U+1F6FF  Transport & Map
+  transport:   ['🚀','🚁','✈️','🚂','🚲','🛴','🚦','🚧','⛽','🛸','🌌','🗺️','🧭','🚀','🛰️'],
+  // U+1F900–U+1F9FF  Supplemental Symbols (activities, body)
+  supplemental: ['🧠','🫀','🫁','🦋','🦄','🐚','🧩','🧪','🧬','🛌','🧘','🦦','🫐','🧊'],
+  // U+1FA00–U+1FA6F  Chess Symbols
+  chess:       ['🩰','🪄','🪅','🪆','🪐','🪨','🪵','🪶','🪷'],
+  // U+2B50–U+2B55  Stars & ratings
+  stars:       ['⭐','🌟','✨','💫','⚡'],
+};
+
+// Flatten into a single array for quick random picks
+const ALL_EMOJIS = Object.values(EMOJI_POOLS).flat();
+
+function randomEmoji() {
+  return ALL_EMOJIS[Math.floor(Math.random() * ALL_EMOJIS.length)];
+}
+
+// ── Physics constants ──
+const MAX_PARTICLES  = 400;
+const FLOOR_RATIO    = 0.92;   // floor at 92% from top (near bottom)
+const PILE_CAP_RATIO = 0.55;   // pile can stack no higher than 55% from top
+const SPAWN_INTERVAL = 0.04;   // seconds between each spawn
+const DRIFT_AMP      = 25;
+const DRIFT_FREQ     = 0.35;
+
+// ── Pile grid: tracks the top surface of settled emojis ──
+// Divides the screen into cells. Each cell tracks the Y coordinate
+// of the highest settled emoji (closest to top) within it.
+const CELL_SIZE = undefined; // computed in resize()
+
+let cellSize, cells;
+
+function initPileGrid() {
+  cellSize = 20;
+  const n = Math.ceil(W / cellSize) + 1;
+  cells = new Float32Array(n).fill(Infinity);
+}
+
+function getPileTop(x) {
+  const idx = Math.floor(x / cellSize);
+  if (idx < 0) idx = 0;
+  if (idx >= cells.length) idx = cells.length - 1;
+  return cells[idx];
+}
+
+function setPileTop(x, y) {
+  const idx = Math.floor(x / cellSize);
+  if (idx < 0 || idx >= cells.length) return;
+  if (y < cells[idx]) cells[idx] = y; // track highest (lowest Y = closest to top)
+}
+
+// ── Emoji particle ──
 class EmojiParticle {
-  constructor() {
-    this.reset();
-  }
-  reset(x) {
-    this.emoji  = emojis[Math.floor(Math.random() * emojis.length)];
-    this.x      = x ?? Math.random() * W;
-    this.y      = -60 - Math.random() * 120;
-    // Physique de base
-    this.vy     = 0;
-    this.gravity = 90 + Math.random() * 80;  // px/s²
-    // Taille
-    this.size   = 18 + Math.random() * 18;    // 18–36px
+  constructor(x, startY) {
+    this.emoji    = randomEmoji();
+    this.x        = x ?? Math.random() * W;
+    this.y        = startY ?? (-60 - Math.random() * 120);
+    this.vy       = 0;
+    this.gravity  = 90 + Math.random() * 80;
+    this.size     = 18 + Math.random() * 18;
     this.baseSize = this.size;
-    // Oscillation latérale (vent léger)
-    this.driftAmp = 20 + Math.random() * 40;
-    this.driftFreq = 0.3 + Math.random() * 0.4;
     this.driftOffset = Math.random() * Math.PI * 2;
-    // Rotation
     this.rotation = Math.random() * Math.PI * 2;
     this.rotSpeed = (Math.random() - 0.5) * 0.8;
-    // Opacité/squash
-    this.opacity  = 0.9 + Math.random() * 0.1;
-    this.settled = false;
-    this.settleY = 0;
-    this.settleX = 0;
+    this.opacity  = 0.85 + Math.random() * 0.15;
+    this.settled  = false;
   }
 
-  update(dt, piles) {
+  // The Y of the bottom edge of this emoji
+  get bottom() { return this.y + this.size * 0.5; }
+
+  update(dt) {
     if (this.settled) return;
 
-    // Gravité
+    // Gravity
     this.vy += this.gravity * dt;
     this.y  += this.vy * dt;
 
-    // Dérive latérale sinusoïdale
-    this.x += Math.sin(this.driftOffset + this.y * this.driftFreq * 0.01) * this.driftAmp * dt;
+    // Gentle horizontal drift (wind)
+    this.x += Math.sin(this.driftOffset + this.y * DRIFT_FREQ * 0.01) * DRIFT_AMP * dt;
+
+    // Rotation during fall
     this.rotation += this.rotSpeed * dt;
 
-    // Vérifier si on touche le sol ou une pile
-    const px = this.x;
-    const py = this.y + this.size * 0.5; // bas de l'emoji
+    // ── Collision check ──
+    // floorY: the floor line (near bottom of screen)
+    const floorY = H * FLOOR_RATIO;
+    // pileTop at this x: the Y of the highest settled emoji in this column
+    const pileTop = getPileTop(this.x);
 
-    // Limite de sol = ligne de pile max → 45% de la hauteur
-    const maxPileH = H * 0.45;
+    // The actual surface we settle on = minimum of floor and pile top
+    const surface = Math.min(floorY, pileTop);
 
-    // Chercher la pile la plus haute à cette position x
-    let pileH = 0; // hauteur de pile en ce point
-    for (const p of piles) {
-      if (Math.abs(p.x - px) < p.size * 0.6) {
-        // Sur une pile existante, prendre le haut de pile
-        if (p.settleY > pileH) pileH = p.settleY;
-      }
-    }
+    // Cap: pile surface cannot go above PILE_CAP_RATIO
+    const maxCap = H * PILE_CAP_RATIO;
 
-    // Condition d'arrêt : atteint le sol ou une pile
-    if (py >= maxPileH - pileH) {
-      this.settled = true;
-      this.settleY = py;
-      this.settleX = this.x;
-      // Légère compression visuelle
-      this.size = this.baseSize * (0.85 + Math.random() * 0.15);
+    // Only settle if we've reached the landing surface
+    if (this.bottom >= surface) {
+      this.settle(surface);
       return;
     }
 
-    // Rebond / squash quand on approche du sol
-    if (py >= maxPileH - pileH - 20 && this.vy > 200) {
-      // Petit ralentissement au sol
-      this.vy *= -0.15;
-      this.y = maxPileH - pileH - this.size * 0.5 - 5;
+    // Squash/bounce when close to surface
+    if (this.bottom >= surface - 15 && this.vy > 150) {
+      this.vy *= -0.12;
+      this.y = surface - this.size * 0.5 - 3;
       this.size = this.baseSize * 0.9;
     }
   }
 
+  settle(y) {
+    this.settled = true;
+    const finalY = Math.max(y, H * PILE_CAP_RATIO); // never go above cap
+    this.y = finalY;
+    this.size = this.baseSize * (0.85 + Math.random() * 0.15);
+    // Register in the pile grid so other emojis stack on top
+    setPileTop(this.x, finalY);
+  }
+
   draw(ctx) {
     ctx.save();
-    ctx.globalAlpha = this.settled ? 0.85 : this.opacity;
+    ctx.globalAlpha = this.settled ? 0.88 : this.opacity;
     ctx.translate(this.x, this.y);
     ctx.rotate(this.rotation);
-    const s = this.size / 36; // échelle relative
     ctx.font = `${this.size}px serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -167,138 +221,99 @@ class EmojiParticle {
   }
 }
 
-// === SETUP ===
+// ── State ──
 let particles = [];
-const MAX_PARTICLES = 350;
-const FLOOR_RATIO = 0.45; // la pile monte jusqu'à 45% de l'écran
 let spawnTimer = 0;
-const SPAWN_INTERVAL = 0.04; // secondes entre chaque goutte
-let lastSpawnX = 0;
 
 function resize() {
   W = window.innerWidth;
   H = window.innerHeight;
-  canvas.width = W;
+  canvas.width  = W;
   canvas.height = H;
-  // Redessiner
+  initPileGrid();
 }
 resize();
 window.addEventListener('resize', resize);
 
-function getPiles() {
-  return particles.filter(p => p.settled);
+// ── Spawn helpers ──
+function spawnRaindrop() {
+  if (particles.length >= MAX_PARTICLES) return;
+  // Avoid dropping directly over the center text
+  let x;
+  do { x = Math.random() * W; } while (Math.abs(x - W / 2) < W * 0.12);
+  particles.push(new EmojiParticle(x));
 }
 
-function spawnBurst(count) {
+function spawnBurst(cx, cy, count, spread) {
+  spread = spread ?? 60;
   for (let i = 0; i < count; i++) {
     if (particles.length >= MAX_PARTICLES) break;
-    const p = new EmojiParticle();
-    // Répartir les x uniformément mais avec un peu d'aléa
-    p.x = (i / count) * W * 0.9 + W * 0.05 + (Math.random() - 0.5) * W * 0.1;
+    const x = cx + (Math.random() - 0.5) * spread;
+    const p = new EmojiParticle(x, cy);
+    p.vy = -350 - Math.random() * 150;  // burst upward
+    p.gravity = 400 + Math.random() * 200;
     particles.push(p);
   }
 }
 
-let burstTimer = 0;
-let burstRemaining = 0;
-
-// === GAME LOOP ===
+// ── Main loop ──
 let lastTime = 0;
+
 function loop(time) {
   const dt = Math.min((time - lastTime) / 1000, 0.05);
   lastTime = time;
 
-  // Spawn continu (pluie douce)
+  // Continuous gentle rain
   if (particles.length < MAX_PARTICLES) {
     spawnTimer += dt;
-    if (spawnTimer >= SPAWN_INTERVAL) {
-      spawnTimer = 0;
-      const p = new EmojiParticle();
-      // Distribution aléatoire, mais éviter le centre (texte)
-      let x;
-      do {
-        x = Math.random() * W;
-      } while (Math.abs(x - W/2) < W * 0.12); // zone de protection au centre
-      p.x = x;
-      particles.push(p);
+    while (spawnTimer >= SPAWN_INTERVAL) {
+      spawnTimer -= SPAWN_INTERVAL;
+      spawnRaindrop();
     }
   }
 
-  // Burst au clic/tap
-  if (burstRemaining > 0) {
-    burstTimer += dt;
-    if (burstTimer >= 0.015) {
-      burstTimer = 0;
-      const p = new EmojiParticle();
-      p.x = Math.random() * W;
-      p.vy = -200 - Math.random() * 100; // burst monte d'abord
-      particles.push(p);
-      burstRemaining--;
-    }
-  }
-
-  // Update toutes les particules
-  const piles = getPiles();
-  for (const p of particles) {
-    p.update(dt, piles);
-  }
+  // Update all
+  for (const p of particles) p.update(dt);
 
   // Draw
   ctx.clearRect(0, 0, W, H);
 
-  // Ligne de sol invisible (pour debug visuel, on dessine un gradient subtil)
+  // Slight floor glow
   const floorY = H * FLOOR_RATIO;
-  const grad = ctx.createLinearGradient(0, floorY - 40, 0, floorY);
+  const grad = ctx.createLinearGradient(0, floorY - 30, 0, floorY + 10);
   grad.addColorStop(0, 'rgba(255,255,255,0)');
-  grad.addColorStop(1, 'rgba(255,255,255,0.04)');
+  grad.addColorStop(0.7, 'rgba(255,255,255,0.03)');
+  grad.addColorStop(1, 'rgba(160,120,255,0.06)');
   ctx.fillStyle = grad;
-  ctx.fillRect(0, floorY - 40, W, 40);
+  ctx.fillRect(0, floorY - 30, W, 40);
 
-  // Dessiner les particules du fond vers le devant (par y)
+  // Draw sorted by Y (back to front)
   const sorted = [...particles].sort((a, b) => a.y - b.y);
-  for (const p of sorted) {
-    p.draw(ctx);
-  }
+  for (const p of sorted) p.draw(ctx);
 
   requestAnimationFrame(loop);
 }
 
-// === INTERACTIONS ===
+// ── Interactions ──
 canvas.addEventListener('click', (e) => {
-  // Burst de 30 emojis à l'endroit du clic, qui montent puis retombent
-  for (let i = 0; i < 30; i++) {
-    if (particles.length >= MAX_PARTICLES) break;
-    const p = new EmojiParticle(e.clientX + (Math.random() - 0.5) * 60);
-    p.y = e.clientY;
-    p.vy = -350 - Math.random() * 150;
-    p.gravity = 400 + Math.random() * 200;
-    particles.push(p);
-  }
+  spawnBurst(e.clientX, e.clientY, 30, 60);
 });
 
 canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
-  const touch = e.touches[0];
-  for (let i = 0; i < 25; i++) {
-    if (particles.length >= MAX_PARTICLES) break;
-    const p = new EmojiParticle(touch.clientX + (Math.random() - 0.5) * 80);
-    p.y = touch.clientY;
-    p.vy = -350 - Math.random() * 150;
-    p.gravity = 400 + Math.random() * 200;
-    particles.push(p);
-  }
+  const t = e.touches[0];
+  spawnBurst(t.clientX, t.clientY, 25, 80);
 });
 
-// Clavier
 document.addEventListener('keydown', (e) => {
   if (e.key === ' ' || e.key === 'Space') {
     e.preventDefault();
-    burstRemaining = 40;
-    burstTimer = 999;
+    // Burst from above
+    for (let i = 0; i < 40; i++) spawnRaindrop();
   }
 });
 
-// Démarrage
+// Go!
 requestAnimationFrame(loop);
 </script>
 </body>
