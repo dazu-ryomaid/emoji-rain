@@ -107,7 +107,8 @@ function randomEmoji() {
 }
 
 // ── Physics constants ──
-const MAX_PARTICLES  = 400;
+const MAX_PARTICLES  = 600;
+const MAX_FALLING    = 50;     // max actively-falling particles (rest settled)
 const FLOOR_RATIO    = 0.92;   // floor at 92% from top (near bottom)
 const PILE_CAP_RATIO = 0.55;   // pile can stack no higher than 55% from top
 const SPAWN_INTERVAL = 0.04;   // seconds between each spawn
@@ -243,16 +244,22 @@ window.addEventListener('resize', resize);
 // ── Spawn helpers ──
 function spawnRaindrop() {
   if (particles.length >= MAX_PARTICLES) return;
-  // Avoid dropping directly over the center text
-  let x;
-  do { x = Math.random() * W; } while (Math.abs(x - W / 2) < W * 0.12);
+  // Count particles still falling
+  const falling = particles.filter(p => !p.settled).length;
+  if (falling >= MAX_FALLING) return;
+  const x = Math.random() * W;
   particles.push(new EmojiParticle(x));
 }
 
 function spawnBurst(cx, cy, count, spread) {
   spread = spread ?? 60;
   for (let i = 0; i < count; i++) {
-    if (particles.length >= MAX_PARTICLES) break;
+    if (particles.length >= MAX_PARTICLES) {
+      // Recycle the oldest settled particle to make room
+      const oldest = particles.findIndex(p => p.settled);
+      if (oldest === -1) break;
+      particles.splice(oldest, 1);
+    }
     const x = cx + (Math.random() - 0.5) * spread;
     const p = new EmojiParticle(x, cy);
     p.vy = -350 - Math.random() * 150;  // burst upward
@@ -292,9 +299,9 @@ function loop(time) {
   ctx.fillStyle = grad;
   ctx.fillRect(0, floorY - 30, W, 40);
 
-  // Draw sorted by Y (back to front)
-  const sorted = [...particles].sort((a, b) => a.y - b.y);
-  for (const p of sorted) p.draw(ctx);
+  // Draw settled first (back), then falling (front) — avoids sorting all particles
+  for (const p of particles) if (p.settled) p.draw(ctx);
+  for (const p of particles) if (!p.settled) p.draw(ctx);
 
   requestAnimationFrame(loop);
 }
