@@ -208,8 +208,9 @@ class EmojiParticle {
     this.size = this.baseSize * (0.85 + Math.random() * 0.15);
     // place the emoji so its bottom equals finalBottom
     this.y = finalBottom - this.size * 0.5;
-    // Register in the pile grid: store the bottom Y so future emojis land on top
-    setPileTop(this.x, finalBottom);
+    // Register in the pile grid: store the top Y so future emojis land on this surface
+    // topY = bottom - size
+    setPileTop(this.x, finalBottom - this.size);
   }
 
   draw(ctx) {
