@@ -212,6 +212,9 @@ class EmojiParticle {
     // Register in the pile grid: store the top Y so future emojis land on this surface
     // topY = bottom - size
     setPileTop(this.x, finalBottom - this.size);
+    // Render to offscreen buffer immediately
+    this.draw(bufCtx);
+    bufDirty = true;
   }
 
   draw(ctx) {
@@ -230,12 +233,22 @@ class EmojiParticle {
 // ── State ──
 let particles = [];
 let spawnTimer = 0;
+let bufCanvas, bufCtx;   // offscreen canvas for caching settled emojis
+let bufDirty = true;     // true when a new emoji settles
 
 function resize() {
   W = window.innerWidth;
   H = window.innerHeight;
   canvas.width  = W;
   canvas.height = H;
+  // Create or resize offscreen buffer
+  if (!bufCanvas) {
+    bufCanvas = document.createElement('canvas');
+    bufCtx = bufCanvas.getContext('2d');
+  }
+  bufCanvas.width = W;
+  bufCanvas.height = H;
+  bufDirty = true;  // force full redraw on resize
   initPileGrid();
 }
 resize();
@@ -254,12 +267,7 @@ function spawnRaindrop() {
 function spawnBurst(cx, cy, count, spread) {
   spread = spread ?? 60;
   for (let i = 0; i < count; i++) {
-    if (particles.length >= MAX_PARTICLES) {
-      // Recycle the oldest settled particle to make room
-      const oldest = particles.findIndex(p => p.settled);
-      if (oldest === -1) break;
-      particles.splice(oldest, 1);
-    }
+    if (particles.length >= MAX_PARTICLES) break;
     const x = cx + (Math.random() - 0.5) * spread;
     const p = new EmojiParticle(x, cy);
     p.vy = -350 - Math.random() * 150;  // burst upward
@@ -290,7 +298,7 @@ function loop(time) {
   // Draw
   ctx.clearRect(0, 0, W, H);
 
-  // Slight floor glow
+  // Slight floor glow (always redrawn)
   const floorY = H * FLOOR_RATIO;
   const grad = ctx.createLinearGradient(0, floorY - 30, 0, floorY + 10);
   grad.addColorStop(0, 'rgba(255,255,255,0)');
@@ -299,8 +307,10 @@ function loop(time) {
   ctx.fillStyle = grad;
   ctx.fillRect(0, floorY - 30, W, 40);
 
-  // Draw settled first (back), then falling (front) — avoids sorting all particles
-  for (const p of particles) if (p.settled) p.draw(ctx);
+  // Blit cached settled particles (fast image copy)
+  ctx.drawImage(bufCanvas, 0, 0);
+
+  // Draw falling particles on top (only a handful at a time)
   for (const p of particles) if (!p.settled) p.draw(ctx);
 
   requestAnimationFrame(loop);
