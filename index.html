@@ -200,14 +200,16 @@ class EmojiParticle {
   }
 
   settle(y) {
-    // y is the surface (the bottom coordinate where this emoji should land)
+    // y is the surface bottom coordinate where this emoji should land
     this.settled = true;
-    const finalBottom = Math.max(y, H * PILE_CAP_RATIO); // bottom cannot go above cap
+    // decide final bottom (cannot be above cap)
+    const finalBottom = Math.max(y, H * PILE_CAP_RATIO);
+    // set size first so placement uses final size
+    this.size = this.baseSize * (0.85 + Math.random() * 0.15);
     // place the emoji so its bottom equals finalBottom
     this.y = finalBottom - this.size * 0.5;
-    this.size = this.baseSize * (0.85 + Math.random() * 0.15);
-    // Register in the pile grid: next surface (top of this emoji) = finalBottom - this.size
-    setPileTop(this.x, finalBottom - this.size);
+    // Register in the pile grid: store the bottom Y so future emojis land on top
+    setPileTop(this.x, finalBottom);
   }
 
   draw(ctx) {
