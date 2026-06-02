@@ -117,7 +117,8 @@ function randomEmoji() {
 }
 
 // ── Physics constants ──
-const MAX_PARTICLES  = 400;
+const MAX_PARTICLES  = 600;
+const MAX_FALLING    = 50;     // max actively-falling particles (rest settled)
 const FLOOR_RATIO    = 0.92;   // floor at 92% from top (near bottom)
 const PILE_CAP_RATIO = 0.55;   // pile can stack no higher than 55% from top
 const SPAWN_INTERVAL = 0.04;   // seconds between each spawn
@@ -226,12 +227,20 @@ class EmojiParticle {
   }
 
   settle(y) {
+    // y is the surface bottom coordinate where this emoji should land
     this.settled = true;
-    const finalY = Math.max(y, H * PILE_CAP_RATIO);
-    this.y = finalY;
+    // set size first so placement uses final size
     this.size = this.baseSize * (0.85 + Math.random() * 0.15);
-    this.fontStr = `${Math.round(this.size)}px serif`; // sync cache
-    setPileTop(this.x, finalY);
+    this.fontStr = `${Math.round(this.size)}px serif`; // sync cached font
+    // decide final bottom (ensure the top of the emoji doesn't cross the pile cap)
+    const finalBottom = Math.max(y, H * PILE_CAP_RATIO + this.size);
+    // place the emoji so its bottom equals finalBottom
+    this.y = finalBottom - this.size * 0.5;
+    // Register in the pile grid: store the top Y so future emojis land on this surface
+    setPileTop(this.x, finalBottom - this.size);
+    // Render to offscreen buffer immediately so we never redraw settled particles
+    this.draw(bufCtx);
+    bufDirty = true;
   }
 
   // No save/restore: set alpha directly, reset transform with setTransform
@@ -248,12 +257,22 @@ class EmojiParticle {
 // ── State ──
 let particles = [];
 let spawnTimer = 0;
+let bufCanvas, bufCtx;   // offscreen canvas for caching settled emojis
+let bufDirty = true;     // true when a new emoji settles
 
 function resize() {
   W = window.innerWidth;
   H = window.innerHeight;
   canvas.width  = W;
   canvas.height = H;
+  // Create or resize offscreen buffer
+  if (!bufCanvas) {
+    bufCanvas = document.createElement('canvas');
+    bufCtx = bufCanvas.getContext('2d');
+  }
+  bufCanvas.width = W;
+  bufCanvas.height = H;
+  bufDirty = true;  // force full redraw on resize
   initPileGrid();
   buildFloorGradient();
 }
@@ -263,8 +282,10 @@ window.addEventListener('resize', resize);
 // ── Spawn helpers ──
 function spawnRaindrop() {
   if (particles.length >= MAX_PARTICLES) return;
-  // Avoid dropping directly over the center text
-  // Bounded loop (was do-while — could spin forever on narrow screens)
+  // Limit actively-falling particles so most are cached in the offscreen buffer
+  const falling = particles.filter(p => !p.settled).length;
+  if (falling >= MAX_FALLING) return;
+  // Avoid dropping directly over the center text (bounded loop)
   const minClear = W * 0.12;
   let x = Math.random() * W;
   for (let i = 0; i < 10; i++) {
@@ -323,31 +344,21 @@ function loop(time) {
 
   // Draw
   ctx.clearRect(0, 0, W, H);
+    // Offscreen buffer: blit cached settled particles (fast image copy)
+    ctx.drawImage(bufCanvas, 0, 0);
 
-  // Floor glow (pre-built gradient, no per-frame creation)
-  const floorY = H * FLOOR_RATIO;
-  ctx.fillStyle = floorGradient;
-  ctx.fillRect(0, floorY - 30, W, 40);
+    // Draw falling + ghosting particles on top (only a handful at a time)
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha  = 1;
+    for (const p of particles) {
+      if (!p.settled) p.draw();
+    }
+  // Blit cached settled particles (fast image copy)
+  ctx.drawImage(bufCanvas, 0, 0);
 
-  // Painter's algorithm — 3 linear passes, no sort (O(n) vs O(n log n))
-  // Set shared state once outside the loops
-  ctx.textAlign    = 'center';
-  ctx.textBaseline = 'middle';
-
-  // Pass 1: falling emojis (behind the pile)
-  for (const p of particles) {
-    if (!p.settled && !p.ghosting) p.draw();
-  }
-  // Pass 2: settled pile (on top of falling)
-  for (const p of particles) {
-    if (p.settled) p.draw();
-  }
-  // Pass 3: ghosting (passing through the pile, on top)
-  for (const p of particles) {
-    if (p.ghosting) p.draw();
-  }
-
-  ctx.globalAlpha = 1; // restore after ghosting draws
+  // Draw falling particles on top (only a handful at a time)
+  for (const p of particles) if (!p.settled) p.draw(ctx);
 
   requestAnimationFrame(loop);
 }
