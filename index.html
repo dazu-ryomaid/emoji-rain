@@ -56,6 +56,15 @@
     animation: pulse 2s ease-in-out infinite;
   }
   @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:.8} }
+  #fps-counter {
+    position: fixed;
+    top: .5rem; left: .5rem;
+    color: rgba(255,255,255,.4);
+    font-size: .7rem;
+    font-family: monospace;
+    z-index: 10;
+    pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -65,6 +74,7 @@
   <p>sur ce site de test</p>
 </div>
 <p id="tap-hint">tape / clique pour une rafale</p>
+<div id="fps-counter">-- FPS</div>
 
 <div id="canvas-container">
   <canvas id="canvas"></canvas>
@@ -115,10 +125,6 @@ const DRIFT_AMP      = 25;
 const DRIFT_FREQ     = 0.35;
 
 // ── Pile grid: tracks the top surface of settled emojis ──
-// Divides the screen into cells. Each cell tracks the Y coordinate
-// of the highest settled emoji (closest to top) within it.
-const CELL_SIZE = undefined; // computed in resize()
-
 let cellSize, cells;
 
 function initPileGrid() {
@@ -127,8 +133,9 @@ function initPileGrid() {
   cells = new Float32Array(n).fill(Infinity);
 }
 
+// FIX: was `const idx` causing TypeError on reassignment
 function getPileTop(x) {
-  const idx = Math.floor(x / cellSize);
+  let idx = Math.floor(x / cellSize);
   if (idx < 0) idx = 0;
   if (idx >= cells.length) idx = cells.length - 1;
   return cells[idx];
@@ -137,7 +144,18 @@ function getPileTop(x) {
 function setPileTop(x, y) {
   const idx = Math.floor(x / cellSize);
   if (idx < 0 || idx >= cells.length) return;
-  if (y < cells[idx]) cells[idx] = y; // track highest (lowest Y = closest to top)
+  if (y < cells[idx]) cells[idx] = y;
+}
+
+// ── Floor glow gradient — pre-built in resize(), not per frame ──
+let floorGradient = null;
+
+function buildFloorGradient() {
+  const floorY = H * FLOOR_RATIO;
+  floorGradient = ctx.createLinearGradient(0, floorY - 30, 0, floorY + 10);
+  floorGradient.addColorStop(0, 'rgba(255,255,255,0)');
+  floorGradient.addColorStop(0.7, 'rgba(255,255,255,0.03)');
+  floorGradient.addColorStop(1, 'rgba(160,120,255,0.06)');
 }
 
 // ── Emoji particle ──
@@ -150,18 +168,27 @@ class EmojiParticle {
     this.gravity  = 90 + Math.random() * 80;
     this.size     = 18 + Math.random() * 18;
     this.baseSize = this.size;
+    this.fontStr  = `${Math.round(this.size)}px serif`; // cached, avoids string concat per frame
     this.driftOffset = Math.random() * Math.PI * 2;
     this.rotation = Math.random() * Math.PI * 2;
     this.rotSpeed = (Math.random() - 0.5) * 0.8;
     this.opacity  = 0.85 + Math.random() * 0.15;
     this.settled  = false;
+    this.ghosting = false; // fading pass-through when pile is at cap
   }
 
-  // The Y of the bottom edge of this emoji
   get bottom() { return this.y + this.size * 0.5; }
 
   update(dt) {
     if (this.settled) return;
+
+    // Ghosting mode: pile was at cap — fade and fall through
+    if (this.ghosting) {
+      this.opacity = Math.max(0, this.opacity - dt * 2);
+      this.vy += this.gravity * dt;
+      this.y  += this.vy * dt;
+      return;
+    }
 
     // Gravity
     this.vy += this.gravity * dt;
@@ -174,19 +201,17 @@ class EmojiParticle {
     this.rotation += this.rotSpeed * dt;
 
     // ── Collision check ──
-    // floorY: the floor line (near bottom of screen)
-    const floorY = H * FLOOR_RATIO;
-    // pileTop at this x: the Y of the highest settled emoji in this column
+    const floorY  = H * FLOOR_RATIO;
     const pileTop = getPileTop(this.x);
-
-    // The actual surface we settle on = minimum of floor and pile top
     const surface = Math.min(floorY, pileTop);
+    const capY    = H * PILE_CAP_RATIO;
 
-    // Cap: pile surface cannot go above PILE_CAP_RATIO
-    const maxCap = H * PILE_CAP_RATIO;
-
-    // Only settle if we've reached the landing surface
     if (this.bottom >= surface) {
+      // Pile is at cap: ghost instead of stacking further
+      if (pileTop <= capY + 1) {
+        this.ghosting = true;
+        return;
+      }
       this.settle(surface);
       return;
     }
@@ -196,28 +221,27 @@ class EmojiParticle {
       this.vy *= -0.12;
       this.y = surface - this.size * 0.5 - 3;
       this.size = this.baseSize * 0.9;
+      this.fontStr = `${Math.round(this.size)}px serif`; // sync cache
     }
   }
 
   settle(y) {
     this.settled = true;
-    const finalY = Math.max(y, H * PILE_CAP_RATIO); // never go above cap
+    const finalY = Math.max(y, H * PILE_CAP_RATIO);
     this.y = finalY;
     this.size = this.baseSize * (0.85 + Math.random() * 0.15);
-    // Register in the pile grid so other emojis stack on top
+    this.fontStr = `${Math.round(this.size)}px serif`; // sync cache
     setPileTop(this.x, finalY);
   }
 
-  draw(ctx) {
-    ctx.save();
-    ctx.globalAlpha = this.settled ? 0.88 : this.opacity;
+  // No save/restore: set alpha directly, reset transform with setTransform
+  draw() {
+    ctx.globalAlpha = this.ghosting ? this.opacity * 0.5 : (this.settled ? 0.88 : this.opacity);
+    ctx.font = this.fontStr;
     ctx.translate(this.x, this.y);
     ctx.rotate(this.rotation);
-    ctx.font = `${this.size}px serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
     ctx.fillText(this.emoji, 0, 0);
-    ctx.restore();
+    ctx.setTransform(1, 0, 0, 1, 0, 0); // reset without push/pop overhead
   }
 }
 
@@ -231,6 +255,7 @@ function resize() {
   canvas.width  = W;
   canvas.height = H;
   initPileGrid();
+  buildFloorGradient();
 }
 resize();
 window.addEventListener('resize', resize);
@@ -239,8 +264,13 @@ window.addEventListener('resize', resize);
 function spawnRaindrop() {
   if (particles.length >= MAX_PARTICLES) return;
   // Avoid dropping directly over the center text
-  let x;
-  do { x = Math.random() * W; } while (Math.abs(x - W / 2) < W * 0.12);
+  // Bounded loop (was do-while — could spin forever on narrow screens)
+  const minClear = W * 0.12;
+  let x = Math.random() * W;
+  for (let i = 0; i < 10; i++) {
+    x = Math.random() * W;
+    if (Math.abs(x - W / 2) >= minClear) break;
+  }
   particles.push(new EmojiParticle(x));
 }
 
@@ -256,12 +286,25 @@ function spawnBurst(cx, cy, count, spread) {
   }
 }
 
+// ── FPS counter ──
+const fpsEl = document.getElementById('fps-counter');
+let fpsCount = 0, fpsAccum = 0;
+
 // ── Main loop ──
 let lastTime = 0;
 
 function loop(time) {
   const dt = Math.min((time - lastTime) / 1000, 0.05);
   lastTime = time;
+
+  // FPS display
+  fpsCount++;
+  fpsAccum += dt;
+  if (fpsAccum >= 1) {
+    fpsEl.textContent = `${fpsCount} FPS`;
+    fpsCount = 0;
+    fpsAccum = 0;
+  }
 
   // Continuous gentle rain
   if (particles.length < MAX_PARTICLES) {
@@ -275,21 +318,36 @@ function loop(time) {
   // Update all
   for (const p of particles) p.update(dt);
 
+  // Remove fully-faded ghosting particles
+  particles = particles.filter(p => !(p.ghosting && p.opacity <= 0));
+
   // Draw
   ctx.clearRect(0, 0, W, H);
 
-  // Slight floor glow
+  // Floor glow (pre-built gradient, no per-frame creation)
   const floorY = H * FLOOR_RATIO;
-  const grad = ctx.createLinearGradient(0, floorY - 30, 0, floorY + 10);
-  grad.addColorStop(0, 'rgba(255,255,255,0)');
-  grad.addColorStop(0.7, 'rgba(255,255,255,0.03)');
-  grad.addColorStop(1, 'rgba(160,120,255,0.06)');
-  ctx.fillStyle = grad;
+  ctx.fillStyle = floorGradient;
   ctx.fillRect(0, floorY - 30, W, 40);
 
-  // Draw sorted by Y (back to front)
-  const sorted = [...particles].sort((a, b) => a.y - b.y);
-  for (const p of sorted) p.draw(ctx);
+  // Painter's algorithm — 3 linear passes, no sort (O(n) vs O(n log n))
+  // Set shared state once outside the loops
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Pass 1: falling emojis (behind the pile)
+  for (const p of particles) {
+    if (!p.settled && !p.ghosting) p.draw();
+  }
+  // Pass 2: settled pile (on top of falling)
+  for (const p of particles) {
+    if (p.settled) p.draw();
+  }
+  // Pass 3: ghosting (passing through the pile, on top)
+  for (const p of particles) {
+    if (p.ghosting) p.draw();
+  }
+
+  ctx.globalAlpha = 1; // restore after ghosting draws
 
   requestAnimationFrame(loop);
 }
